@@ -1,0 +1,788 @@
+using UnityEngine;
+using UnityEditor;
+using System.Collections.Generic;
+using System.Linq;
+
+public class QuickMoveTool : EditorWindow
+{
+    private static bool quickMoveMode;
+    private static bool alignToNormal = true;
+    private static bool collisionCheck = true;
+    private static bool autoSnap = true;
+    private static bool wasdMode;
+    private static float moveSpeed = 1f;
+    private static int gridSnapIndex;
+    private static bool modularSnapMode;
+    private static bool measureMode;
+
+    private static readonly float[] gridSnapSizes = { 0.25f, 0.5f, 1f, 5f };
+    private static readonly string[] gridSnapLabels =
+    {
+        "0.25m Props",
+        "0.5m Small Buildings",
+        "1m Buildings",
+        "5m Large Structures"
+    };
+
+    private static KeyCode snapKey;
+    private static KeyCode quickMoveKey;
+    private static KeyCode edgeSnapKey = KeyCode.V;
+
+    // Edge Snap variables
+    private static bool isEdgeSnapActive;
+    private static MeshFilter sourceMeshFilter;
+    private static int sourceEdgeMeshIndex = -1;
+    private static Vector3 sourceEdgeA;
+    private static Vector3 sourceEdgeB;
+    private static Vector3 targetEdgeA;
+    private static Vector3 targetEdgeB;
+    private static bool hasTargetEdge;
+
+    // Measure variables
+    private static Vector3 measurePointA;
+    private static Vector3 measurePointB;
+    private static bool hasMeasurePointA;
+    private static bool hasMeasurePointB;
+    private static float lastMeasureDistance;
+
+    private static Material previewMeshMaterial;
+
+    [InitializeOnLoadMethod]
+    private static void Init()
+    {
+        snapKey = (KeyCode)EditorPrefs.GetInt("QM_SnapKey", (int)KeyCode.End);
+        quickMoveKey = (KeyCode)EditorPrefs.GetInt("QM_MoveKey", (int)KeyCode.Q);
+        alignToNormal = EditorPrefs.GetBool("QM_AlignToNormal", true);
+        collisionCheck = EditorPrefs.GetBool("QM_CollisionCheck", true);
+        autoSnap = EditorPrefs.GetBool("QM_AutoSnap", true);
+        wasdMode = EditorPrefs.GetBool("QM_WASDMode", false);
+        modularSnapMode = EditorPrefs.GetBool("QM_ModularSnapMode", false);
+        measureMode = EditorPrefs.GetBool("QM_MeasureMode", false);
+        moveSpeed = EditorPrefs.GetFloat("QM_MoveSpeed", 1f);
+        gridSnapIndex = EditorPrefs.GetInt("QM_GridSnapIndex", 2);
+
+        SceneView.duringSceneGui -= OnSceneGUI;
+        SceneView.duringSceneGui += OnSceneGUI;
+    }
+
+    private void OnDisable()
+    {
+        SceneView.duringSceneGui -= OnSceneGUI;
+    }
+
+    [MenuItem("Tools/Quick Move Tool")]
+    public static void ShowWindow()
+    {
+        GetWindow<QuickMoveTool>("Quick Move Tool");
+    }
+
+    private void OnGUI()
+    {
+        GUILayout.Space(10);
+
+        GUILayout.Label("Hotkeys", EditorStyles.boldLabel);
+        snapKey = (KeyCode)EditorGUILayout.EnumPopup("Snap To Surface", snapKey);
+        quickMoveKey = (KeyCode)EditorGUILayout.EnumPopup("Toggle Quick Move", quickMoveKey);
+        edgeSnapKey = (KeyCode)EditorGUILayout.EnumPopup("Edge Snap Key", edgeSnapKey);
+
+        GUILayout.Space(10);
+
+        GUILayout.Label("Features", EditorStyles.boldLabel);
+        alignToNormal = EditorGUILayout.Toggle("Align To Normal", alignToNormal);
+        collisionCheck = EditorGUILayout.Toggle("Collision Check", collisionCheck);
+        autoSnap = EditorGUILayout.Toggle("Auto Snap While Move", autoSnap);
+        modularSnapMode = EditorGUILayout.Toggle("Modular Snap Mode", modularSnapMode);
+        measureMode = EditorGUILayout.Toggle("Measuring Tool", measureMode);
+
+        GUILayout.Space(5);
+
+        wasdMode = EditorGUILayout.Toggle("WASD Placement Mode", wasdMode);
+        if (wasdMode)
+        {
+            EditorGUI.indentLevel++;
+            moveSpeed = EditorGUILayout.FloatField("Move Speed", moveSpeed);
+            EditorGUI.indentLevel--;
+        }
+
+        GUILayout.Space(10);
+
+        gridSnapIndex = EditorGUILayout.Popup("Grid Snap", gridSnapIndex, gridSnapLabels);
+
+        if (GUILayout.Button("Save Settings"))
+        {
+            EditorPrefs.SetInt("QM_SnapKey", (int)snapKey);
+            EditorPrefs.SetInt("QM_MoveKey", (int)quickMoveKey);
+            EditorPrefs.SetBool("QM_AlignToNormal", alignToNormal);
+            EditorPrefs.SetBool("QM_CollisionCheck", collisionCheck);
+            EditorPrefs.SetBool("QM_AutoSnap", autoSnap);
+            EditorPrefs.SetBool("QM_WASDMode", wasdMode);
+            EditorPrefs.SetBool("QM_ModularSnapMode", modularSnapMode);
+            EditorPrefs.SetBool("QM_MeasureMode", measureMode);
+            EditorPrefs.SetFloat("QM_MoveSpeed", moveSpeed);
+            EditorPrefs.SetInt("QM_GridSnapIndex", gridSnapIndex);
+
+            Debug.Log("Quick Move settings saved.");
+        }
+
+        GUILayout.Space(15);
+
+        // Status Display
+        GUI.color = quickMoveMode ? Color.green : Color.gray;
+        GUILayout.Label(quickMoveMode ? "Quick Move: ENABLED" : "Quick Move: DISABLED", EditorStyles.helpBox);
+
+        if (quickMoveMode)
+        {
+            GUI.color = alignToNormal ? Color.cyan : Color.yellow;
+            GUILayout.Label($"Align To Normal: {(alignToNormal ? "ON" : "OFF")}", EditorStyles.helpBox);
+
+            GUI.color = collisionCheck ? Color.red : Color.green;
+            GUILayout.Label($"Collision Check: {(collisionCheck ? "ON" : "OFF")}", EditorStyles.helpBox);
+
+            GUI.color = autoSnap ? Color.magenta : Color.gray;
+            GUILayout.Label($"Auto Snap: {(autoSnap ? "ON" : "OFF")}", EditorStyles.helpBox);
+
+            GUI.color = wasdMode ? Color.blue : Color.gray;
+            GUILayout.Label($"WASD Mode: {(wasdMode ? "ON" : "OFF")} (Speed: {moveSpeed})", EditorStyles.helpBox);
+
+            GUI.color = isEdgeSnapActive ? Color.cyan : Color.gray;
+            GUILayout.Label($"Edge Snap: {(isEdgeSnapActive ? "ACTIVE" : "INACTIVE")}", EditorStyles.helpBox);
+        }
+
+        GUI.color = Color.white;
+    }
+
+    private static void OnSceneGUI(SceneView sceneView)
+    {
+        Event e = Event.current;
+        HandleKeyboardShortcuts(e);
+
+
+        if (!quickMoveMode && !measureMode) return;
+
+        if (quickMoveMode)
+        {
+            DrawGUI(e);
+            DrawPlacementPreview(e);
+            HandleWASDMode(e, sceneView);
+            HandleMouseClick(e);
+            HandleAutoSnap();
+        }
+
+        if (measureMode)
+        {
+            HandleMeasureMode(e, sceneView);
+        }
+    }
+
+    private static void HandleKeyboardShortcuts(Event e)
+    {
+        if (e.keyCode == snapKey && e.type == EventType.KeyDown)
+        {
+            SnapSelection();
+            e.Use();
+            return;
+        }
+
+        if (e.keyCode == quickMoveKey && e.type == EventType.KeyDown)
+        {
+            quickMoveMode = !quickMoveMode;
+            Debug.Log(quickMoveMode ? "Quick Move Enabled" : "Quick Move Disabled");
+            e.Use();
+            return;
+        }
+
+        if (e.keyCode == edgeSnapKey)
+        {
+            if (e.type == EventType.KeyDown)
+            {
+                BeginEdgeSnap(e.mousePosition);
+                e.Use();
+            }
+            else if (e.type == EventType.KeyUp && isEdgeSnapActive)
+            {
+                CompleteEdgeSnap();
+                ClearEdgeSnap();
+                e.Use();
+            }
+        }
+    }
+
+    private static void HandleEdgeSnap(SceneView sceneView, Event e)
+    {
+        if (!isEdgeSnapActive || Selection.activeGameObject == null) return;
+
+        if (e.type == EventType.MouseMove || e.type == EventType.Repaint)
+        {
+            UpdateTargetEdge(e.mousePosition);
+            sceneView.Repaint();
+        }
+
+        if (sourceEdgeA != Vector3.zero && sourceEdgeB != Vector3.zero)
+        {
+            Handles.color = Color.yellow;
+            Handles.DrawLine(sourceEdgeA, sourceEdgeB);
+
+            if (hasTargetEdge)
+            {
+                Handles.color = Color.cyan;
+                Handles.DrawLine(targetEdgeA, targetEdgeB);
+                Handles.DrawDottedLine(sourceEdgeA, targetEdgeA, 2f);
+            }
+        }
+    }
+
+    private static void BeginEdgeSnap(Vector2 mousePosition)
+    {
+        GameObject selected = Selection.activeGameObject;
+        if (selected == null) return;
+
+        sourceMeshFilter = selected.GetComponentInChildren<MeshFilter>();
+        if (sourceMeshFilter == null || sourceMeshFilter.sharedMesh == null)
+        {
+            isEdgeSnapActive = false;
+            return;
+        }
+
+        if (!TryFindClosestEdge(sourceMeshFilter, mousePosition, out sourceEdgeA, out sourceEdgeB))
+        {
+            isEdgeSnapActive = false;
+            return;
+        }
+
+        hasTargetEdge = false;
+        targetEdgeA = Vector3.zero;
+        targetEdgeB = Vector3.zero;
+        isEdgeSnapActive = true;
+    }
+
+    private static void UpdateTargetEdge(Vector2 mousePosition)
+    {
+        GameObject selected = Selection.activeGameObject;
+        if (selected == null) return;
+
+        MeshFilter[] meshFilters = selected.scene
+            .GetRootGameObjects()
+            .SelectMany(x => x.GetComponentsInChildren<MeshFilter>())
+            .ToArray();
+
+        float minDistance = float.MaxValue;
+        hasTargetEdge = false;
+
+        foreach (MeshFilter meshFilter in meshFilters)
+        {
+            if (meshFilter == null || meshFilter.sharedMesh == null) continue;
+            if (meshFilter.transform == sourceMeshFilter.transform || meshFilter.transform.IsChildOf(sourceMeshFilter.transform)) continue;
+            if (meshFilter.transform.IsChildOf(selected.transform) || selected.transform.IsChildOf(meshFilter.transform)) continue;
+
+            if (TryFindClosestEdge(meshFilter, mousePosition, out Vector3 edgeA, out Vector3 edgeB))
+            {
+                Vector2 midPoint = (HandleUtility.WorldToGUIPoint(edgeA) + HandleUtility.WorldToGUIPoint(edgeB)) * 0.5f;
+                float distance = Vector2.Distance(midPoint, mousePosition);
+
+                if (distance < minDistance)
+                {
+                    minDistance = distance;
+                    hasTargetEdge = true;
+                    targetEdgeA = edgeA;
+                    targetEdgeB = edgeB;
+                }
+            }
+        }
+    }
+
+    private static bool TryFindClosestEdge(MeshFilter meshFilter, Vector2 mousePosition, out Vector3 edgeA, out Vector3 edgeB)
+    {
+        edgeA = Vector3.zero;
+        edgeB = Vector3.zero;
+        if (meshFilter == null || meshFilter.sharedMesh == null) return false;
+
+        Mesh mesh = meshFilter.sharedMesh;
+        int[] triangles = mesh.triangles;
+        Vector3[] vertices = mesh.vertices;
+        var seen = new HashSet<long>();
+
+        float minDistance = float.MaxValue;
+        bool found = false;
+
+        for (int i = 0; i < triangles.Length; i += 3)
+        {
+            int[] edgeIndices = { triangles[i], triangles[i + 1], triangles[i + 2] };
+            for (int j = 0; j < 3; j++)
+            {
+                int aIndex = edgeIndices[j];
+                int bIndex = edgeIndices[(j + 1) % 3];
+                int min = Mathf.Min(aIndex, bIndex);
+                int max = Mathf.Max(aIndex, bIndex);
+                long key = ((long)min << 32) | (uint)max;
+                if (!seen.Add(key)) continue;
+
+                Vector3 worldA = meshFilter.transform.TransformPoint(vertices[aIndex]);
+                Vector3 worldB = meshFilter.transform.TransformPoint(vertices[bIndex]);
+                Vector2 screenA = HandleUtility.WorldToGUIPoint(worldA);
+                Vector2 screenB = HandleUtility.WorldToGUIPoint(worldB);
+                float distance = DistancePointToSegment(mousePosition, screenA, screenB);
+
+                if (distance < minDistance && distance < 30f)
+                {
+                    minDistance = distance;
+                    found = true;
+                    edgeA = worldA;
+                    edgeB = worldB;
+                }
+            }
+        }
+
+        return found;
+    }
+
+    private static float DistancePointToSegment(Vector2 point, Vector2 a, Vector2 b)
+    {
+        Vector2 ab = b - a;
+        float t = Mathf.Clamp01(Vector2.Dot(point - a, ab) / Vector2.Dot(ab, ab));
+        Vector2 projection = a + ab * t;
+        return Vector2.Distance(point, projection);
+    }
+
+    private static int FindClosestVertex(MeshFilter meshFilter, Vector2 mousePosition, out Vector3 vertexWorld)
+    {
+        vertexWorld = Vector3.zero;
+        if (meshFilter == null || meshFilter.sharedMesh == null) return -1;
+
+        Vector3[] vertices = meshFilter.sharedMesh.vertices;
+        float minDistance = float.MaxValue;
+        int foundIndex = -1;
+
+        for (int i = 0; i < vertices.Length; i++)
+        {
+            Vector3 worldVertex = meshFilter.transform.TransformPoint(vertices[i]);
+            Vector2 screenPoint = HandleUtility.WorldToGUIPoint(worldVertex);
+            float distance = Vector2.Distance(screenPoint, mousePosition);
+            if (distance < minDistance && distance < 30f)
+            {
+                minDistance = distance;
+                foundIndex = i;
+                vertexWorld = worldVertex;
+            }
+        }
+
+        return foundIndex;
+    }
+
+    private static void CompleteEdgeSnap()
+    {
+        if (!hasTargetEdge || Selection.activeGameObject == null) return;
+
+        GameObject selected = Selection.activeGameObject;
+        Undo.RecordObject(selected.transform, "Edge Snap");
+
+        Vector3 sourceDir = (sourceEdgeB - sourceEdgeA).normalized;
+        Vector3 targetDir = (targetEdgeB - targetEdgeA).normalized;
+        Quaternion rotationAdjustment = Quaternion.FromToRotation(sourceDir, targetDir);
+
+        Vector3 rotatedSourceA = rotationAdjustment * (sourceEdgeA - selected.transform.position) + selected.transform.position;
+        Vector3 offset = targetEdgeA - rotatedSourceA;
+
+        selected.transform.rotation = rotationAdjustment * selected.transform.rotation;
+        selected.transform.position += offset;
+
+        SnapObject(selected);
+    }
+
+    private static void ClearEdgeSnap()
+    {
+        sourceEdgeA = Vector3.zero;
+        sourceEdgeB = Vector3.zero;
+        targetEdgeA = Vector3.zero;
+        targetEdgeB = Vector3.zero;
+        hasTargetEdge = false;
+        isEdgeSnapActive = false;
+        SceneView.RepaintAll();
+    }
+
+    private static float GetGridSize()
+    {
+        return gridSnapIndex >= 0 && gridSnapIndex < gridSnapSizes.Length ? gridSnapSizes[gridSnapIndex] : 1f;
+    }
+
+    private static Vector3 SnapToGrid(Vector3 position, float gridSize, bool snapY)
+    {
+        if (gridSize <= 0f) return position;
+        position.x = Mathf.Round(position.x / gridSize) * gridSize;
+        position.z = Mathf.Round(position.z / gridSize) * gridSize;
+        if (snapY)
+        {
+            position.y = Mathf.Round(position.y / gridSize) * gridSize;
+        }
+        return position;
+    }
+
+    private static bool TryModularSnap(GameObject selected, Vector3 hitPoint)
+    {
+        ModularSnapPoint[] sourcePoints = selected.GetComponentsInChildren<ModularSnapPoint>(true);
+        if (sourcePoints.Length == 0) return false;
+
+        ModularSnapPoint bestSource = null;
+        float bestSourceDistance = float.MaxValue;
+        foreach (var source in sourcePoints)
+        {
+            float distance = Vector3.Distance(source.transform.position, hitPoint);
+            if (distance < bestSourceDistance)
+            {
+                bestSourceDistance = distance;
+                bestSource = source;
+            }
+        }
+
+        if (bestSource == null) return false;
+
+        ModularSnapPoint[] targetPoints = GetSceneModularSnapPoints(selected);
+        if (targetPoints.Length == 0) return false;
+
+        ModularSnapPoint bestTarget = null;
+        float bestMatch = float.MaxValue;
+        foreach (var target in targetPoints)
+        {
+            if (target == null) continue;
+            if (target == bestSource) continue;
+            if (target.transform.IsChildOf(selected.transform) || selected.transform.IsChildOf(target.transform)) continue;
+
+            float directionScore = 1f - Mathf.Abs(Vector3.Dot(bestSource.transform.forward, -target.transform.forward));
+            float distanceScore = Vector3.Distance(bestSource.transform.position, target.transform.position);
+            float score = directionScore * 2f + distanceScore * 0.02f;
+            if (score < bestMatch)
+            {
+                bestMatch = score;
+                bestTarget = target;
+            }
+        }
+
+        if (bestTarget == null) return false;
+
+        Quaternion rotationAdjustment = Quaternion.FromToRotation(bestSource.transform.forward, -bestTarget.transform.forward);
+        Quaternion finalRotation = rotationAdjustment * selected.transform.rotation;
+        Vector3 localSource = bestSource.transform.position - selected.transform.position;
+        Vector3 rotatedSourceOffset = finalRotation * localSource;
+        Vector3 desiredPosition = bestTarget.transform.position - rotatedSourceOffset;
+
+        selected.transform.rotation = finalRotation;
+        selected.transform.position = desiredPosition;
+        return true;
+    }
+
+    private static ModularSnapPoint[] GetSceneModularSnapPoints(GameObject selected)
+    {
+        return selected.scene.GetRootGameObjects()
+            .SelectMany(root => root.GetComponentsInChildren<ModularSnapPoint>(true))
+            .Where(point => point != null && !point.transform.IsChildOf(selected.transform) && point.transform.root != selected.transform.root)
+            .ToArray();
+    }
+
+    private static void DrawGUI(Event e)
+    {
+        Handles.BeginGUI();
+
+        GUI.color = Color.green;
+        GUILayout.BeginArea(new Rect(10, 10, 220, 120), "Quick Move ON", GUI.skin.window);
+        GUILayout.Label("Click Surface to Place");
+        GUILayout.Label($"Align: {(alignToNormal ? "ON" : "OFF")} | Collision: {(collisionCheck ? "ON" : "OFF")}");
+        GUILayout.Label($"Auto Snap: {(autoSnap ? "ON" : "OFF")} | WASD: {(wasdMode ? "ON" : "OFF")}");
+        GUILayout.Label($"Grid Snap: {gridSnapLabels[gridSnapIndex]}");
+        GUILayout.Label($"Modular Snap: {(modularSnapMode ? "ON" : "OFF")}");
+        GUILayout.Label($"Edge Snap (V): {(isEdgeSnapActive ? "ACTIVE" : "OFF")}");
+        GUILayout.Label($"Measure Tool: {(measureMode ? "ON" : "OFF")}");
+        GUILayout.Label("Measure: Click A then B, Esc reset");
+        GUILayout.EndArea();
+
+        GUI.color = Color.white;
+        Handles.EndGUI();
+    }
+
+    private static void DrawPlacementPreview(Event e)
+    {
+        if (!quickMoveMode || Selection.activeGameObject == null || e.alt) return;
+
+        Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+        object snap = HandleUtility.RaySnap(ray);
+        if (!(snap is RaycastHit hit)) return;
+
+        GameObject selected = Selection.activeGameObject;
+        MeshFilter[] meshFilters = selected.GetComponentsInChildren<MeshFilter>();
+        if (meshFilters.Length == 0) return;
+
+        Quaternion rotation = selected.transform.rotation;
+        if (alignToNormal)
+        {
+            rotation = Quaternion.FromToRotation(Vector3.up, hit.normal) * rotation;
+        }
+
+        if (previewMeshMaterial == null)
+        {
+            Shader shader = Shader.Find("Hidden/Internal-Colored");
+            if (shader != null)
+            {
+                previewMeshMaterial = new Material(shader)
+                {
+                    hideFlags = HideFlags.HideAndDontSave
+                };
+                previewMeshMaterial.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+                previewMeshMaterial.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+                previewMeshMaterial.SetInt("_Cull", (int)UnityEngine.Rendering.CullMode.Off);
+                previewMeshMaterial.SetInt("_ZWrite", 0);
+                previewMeshMaterial.SetInt("_ZTest", (int)UnityEngine.Rendering.CompareFunction.LessEqual);
+            }
+        }
+
+        if (previewMeshMaterial == null) return;
+
+        previewMeshMaterial.SetPass(0);
+        previewMeshMaterial.color = new Color(0f, 1f, 0f, 0.25f);
+
+        foreach (MeshFilter meshFilter in meshFilters)
+        {
+            if (meshFilter.sharedMesh == null) continue;
+
+            Vector3 localOffset = meshFilter.transform.position - selected.transform.position;
+            Vector3 previewPosition = hit.point + localOffset;
+            Matrix4x4 matrix = Matrix4x4.TRS(previewPosition, rotation * Quaternion.Inverse(selected.transform.rotation) * meshFilter.transform.rotation, meshFilter.transform.lossyScale);
+            Graphics.DrawMeshNow(meshFilter.sharedMesh, matrix);
+        }
+    }
+
+    private static void HandleMeasureMode(Event e, SceneView sceneView)
+    {
+        if (!measureMode || sceneView == null) return;
+
+        if (e.type == EventType.MouseDown && e.button == 0 && !e.alt)
+        {
+            Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+            object snap = HandleUtility.RaySnap(ray);
+            if (snap is RaycastHit hit)
+            {
+                if (!hasMeasurePointA)
+                {
+                    measurePointA = hit.point;
+                    hasMeasurePointA = true;
+                    hasMeasurePointB = false;
+                    lastMeasureDistance = 0f;
+                }
+                else
+                {
+                    measurePointB = hit.point;
+                    hasMeasurePointB = true;
+                    lastMeasureDistance = Vector3.Distance(measurePointA, measurePointB);
+                }
+
+                e.Use();
+                SceneView.RepaintAll();
+            }
+        }
+
+        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Escape)
+        {
+            hasMeasurePointA = false;
+            hasMeasurePointB = false;
+            lastMeasureDistance = 0f;
+            e.Use();
+            SceneView.RepaintAll();
+        }
+
+        DrawMeasurePreview();
+    }
+
+    private static void DrawMeasurePreview()
+    {
+        if (!measureMode) return;
+
+        Handles.color = Color.yellow;
+        if (hasMeasurePointA)
+        {
+            Handles.SphereHandleCap(0, measurePointA, Quaternion.identity, 0.05f, EventType.Repaint);
+        }
+
+        if (hasMeasurePointB)
+        {
+            Handles.SphereHandleCap(0, measurePointB, Quaternion.identity, 0.05f, EventType.Repaint);
+            Handles.DrawLine(measurePointA, measurePointB);
+            Vector3 center = (measurePointA + measurePointB) * 0.5f;
+            Handles.Label(center, $"{lastMeasureDistance:F2} m");
+        }
+    }
+
+    private static void HandleWASDMode(Event e, SceneView sceneView)
+    {
+        if (!wasdMode || Selection.activeGameObject == null || sceneView == null) return;
+        if (e.type != EventType.KeyDown) return;
+
+        Transform t = Selection.activeGameObject.transform;
+        Vector3 movement = Vector3.zero;
+
+        Vector3 forward = Vector3.ProjectOnPlane(sceneView.camera.transform.forward, Vector3.up).normalized;
+        Vector3 right = Vector3.ProjectOnPlane(sceneView.camera.transform.right, Vector3.up).normalized;
+
+        switch (e.keyCode)
+        {
+            case KeyCode.W: movement = forward * moveSpeed; break;
+            case KeyCode.S: movement = -forward * moveSpeed; break;
+            case KeyCode.A: movement = -right * moveSpeed; break;
+            case KeyCode.D: movement = right * moveSpeed; break;
+            case KeyCode.Q: movement = Vector3.up * moveSpeed; break;
+            case KeyCode.E: movement = Vector3.down * moveSpeed; break;
+            default: return;
+        }
+
+        Undo.RecordObject(t, "WASD Move");
+        t.position += movement;
+
+        if (autoSnap)
+        {
+            SnapObject(t.gameObject);
+        }
+        else
+        {
+            SnapToGrid(t.transform.position, GetGridSize(), true);
+        }
+
+        SceneView.RepaintAll();
+        e.Use();
+    }
+
+    private static void HandleMouseClick(Event e)
+    {
+        if (e.type != EventType.MouseDown || e.button != 0 || e.alt) return;
+
+        GameObject selected = Selection.activeGameObject;
+        if (selected == null) return;
+
+        Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
+        object snap = HandleUtility.RaySnap(ray);
+
+        if (snap is RaycastHit hit)
+        {
+            if (collisionCheck && WouldCollide(selected, hit.point))
+            {
+                Debug.LogWarning("Collision detected! Placement prevented.");
+                return;
+            }
+
+            Undo.RecordObject(selected.transform, "Quick Move");
+
+            if (modularSnapMode && TryModularSnap(selected, hit.point))
+            {
+                e.Use();
+                return;
+            }
+
+            selected.transform.position = hit.point;
+
+            if (alignToNormal)
+            {
+                AlignObjectToNormal(selected, hit.normal);
+            }
+
+            SnapObject(selected);
+            e.Use();
+        }
+    }
+
+    private static bool WouldCollide(GameObject obj, Vector3 targetPosition)
+    {
+        Renderer rend = obj.GetComponentInChildren<Renderer>();
+        if (rend == null) return false;
+
+        Vector3 originalPosition = obj.transform.position;
+        obj.transform.position = targetPosition;
+
+        Collider[] overlaps = Physics.OverlapBox(
+            rend.bounds.center,
+            rend.bounds.extents * 0.95f,
+            obj.transform.rotation);
+
+        bool collision = false;
+        foreach (Collider col in overlaps)
+        {
+            if (col == null || col.transform == obj.transform || col.transform.IsChildOf(obj.transform))
+                continue;
+
+            collision = true;
+            break;
+        }
+
+        obj.transform.position = originalPosition;
+        return collision;
+    }
+
+    private static void HandleAutoSnap()
+    {
+        if (!autoSnap) return;
+
+        foreach (GameObject obj in Selection.gameObjects)
+        {
+            if (obj.transform.hasChanged)
+            {
+                obj.transform.hasChanged = false;
+                SnapObject(obj);
+            }
+        }
+    }
+
+    private static void AlignObjectToNormal(GameObject obj, Vector3 normal)
+    {
+        // Full alignment to surface normal
+        obj.transform.rotation = Quaternion.FromToRotation(Vector3.up, normal);
+
+        /* Alternative: Keep Y rotation, only adjust X and Z
+        Vector3 forward = Vector3.ProjectOnPlane(obj.transform.forward, normal);
+        if (forward != Vector3.zero)
+        {
+            obj.transform.rotation = Quaternion.LookRotation(forward, normal);
+        }
+        */
+    }
+
+    private static void SnapSelection()
+    {
+        foreach (GameObject obj in Selection.gameObjects)
+        {
+            SnapObject(obj);
+        }
+    }
+
+    private static void SnapObject(GameObject obj)
+    {
+        Renderer rend = obj.GetComponentInChildren<Renderer>();
+        if (rend == null) return;
+
+        Bounds bounds = rend.bounds;
+        Vector3 origin = new Vector3(
+            bounds.center.x,
+            bounds.max.y + 1000f,
+            bounds.center.z
+        );
+
+        RaycastHit[] hits = Physics.RaycastAll(origin, Vector3.down, 5000f);
+
+        float bestHit = float.NegativeInfinity;
+        bool found = false;
+
+        foreach (RaycastHit hit in hits)
+        {
+            if (hit.transform == obj.transform || 
+                hit.transform.IsChildOf(obj.transform))
+                continue;
+
+            if (hit.point.y > bestHit)
+            {
+                bestHit = hit.point.y;
+                found = true;
+            }
+        }
+
+        if (!found) return;
+
+        float offset = obj.transform.position.y - bounds.min.y;
+        Vector3 pos = obj.transform.position;
+        pos.y = bestHit + offset;
+        pos = SnapToGrid(pos, GetGridSize(), false);
+        obj.transform.position = pos;
+    }
+}
